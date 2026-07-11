@@ -1,0 +1,14 @@
+path: datasets/food
+train: images/train
+val: images/val
+
+names:
+  0: dal
+  1: roti
+  2: rice
+  3: burger
+  4: pizza
+  5: sandwich
+  6: banana
+  7: apple
+  8: cake

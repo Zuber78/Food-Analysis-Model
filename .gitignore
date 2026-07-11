@@ -1,0 +1,7 @@
+node_modules
+/dist
+/.env
+/runs
+/datasets/food/images
+/datasets/food/labels
+/models/*.pt

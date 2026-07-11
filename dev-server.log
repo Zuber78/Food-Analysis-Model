@@ -1,0 +1,12 @@
+
+> ai-food-nutrition-analyzer@1.0.0 dev
+> concurrently "npm run dev:client" "npm run dev:server"
+
+[0] 
+[0] > ai-food-nutrition-analyzer@1.0.0 dev:client
+[0] > vite
+[0] 
+[1] 
+[1] > ai-food-nutrition-analyzer@1.0.0 dev:server
+[1] > nodemon server.js
+[1] 
