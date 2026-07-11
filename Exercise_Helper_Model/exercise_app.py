@@ -6,8 +6,17 @@
 =============================================================
 """
 
+import argparse
+import math
+import os
+import sys
+import threading
+import time
+import subprocess
+
 import cv2
 import mediapipe as mp
+import numpy as np
 from mediapipe.tasks.python import BaseOptions
 from mediapipe.tasks.python.vision import (
     PoseLandmarker,
@@ -16,12 +25,6 @@ from mediapipe.tasks.python.vision import (
     RunningMode,
     PoseLandmark,
 )
-import numpy as np
-import time
-import math
-import sys
-import os
-import threading
 
 # ─────────────────────────────────────────────
 # Model Path
@@ -777,12 +780,13 @@ def show_break_screen(cap, break_duration, next_exercise_name):
         progress = elapsed / break_duration
         draw_progress_bar(frame, 50, h - 50, w - 100, 15, progress, COLOR_CYAN)
 
-        cv2.imshow("Exercise Helper", frame)
+        if not safe_imshow("Exercise Helper", frame):
+            return False
 
         if remaining <= 0:
             break
 
-        key = cv2.waitKey(30) & 0xFF
+        key = safe_wait_key(30)
         if key == ord('q') or key == 27:
             return False
         if key == ord('s'):
@@ -828,9 +832,10 @@ def show_summary_screen(cap, results):
         cv2.putText(frame, "Press 'Q' to exit | Bahut accha kaam kiya!", (50, h - 40),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, COLOR_PURPLE, 2, cv2.LINE_AA)
 
-        cv2.imshow("Exercise Helper", frame)
+        if not safe_imshow("Exercise Helper", frame):
+            return False
 
-        key = cv2.waitKey(30) & 0xFF
+        key = safe_wait_key(30)
         if key == ord('q') or key == 27:
             break
 
@@ -838,6 +843,16 @@ def show_summary_screen(cap, results):
 # ═══════════════════════════════════════════════════════════
 # Countdown Before Exercise Starts
 # ═══════════════════════════════════════════════════════════
+def get_countdown_state(elapsed, countdown=5):
+    """Return the current countdown state for the pre-exercise screen."""
+    if elapsed >= countdown:
+        return {"finished": True, "text": "GO!", "color": COLOR_GREEN}
+
+    remaining = countdown - elapsed
+    display_value = max(1, int(remaining) + 1)
+    return {"finished": False, "text": str(display_value), "color": COLOR_CYAN}
+
+
 def show_countdown(cap, exercise_name, countdown=5):
     """Show a GET READY countdown before each exercise."""
     start = time.time()
@@ -850,7 +865,7 @@ def show_countdown(cap, exercise_name, countdown=5):
         h, w = frame.shape[:2]
 
         elapsed = time.time() - start
-        remaining = max(0, countdown - elapsed)
+        countdown_state = get_countdown_state(elapsed, countdown)
 
         overlay = frame.copy()
         cv2.rectangle(overlay, (0, 0), (w, h), COLOR_BG_DARK, -1)
@@ -865,28 +880,22 @@ def show_countdown(cap, exercise_name, countdown=5):
         cv2.putText(frame, ready_text, (w // 2 - rw // 2, h // 2 - 50),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.8, COLOR_WHITE, 2, cv2.LINE_AA)
 
-        if remaining <= 0:
-            count_text = "GO!"
-            count_color = COLOR_GREEN
-        else:
-            count_text = str(int(remaining) + 1)
-            count_color = COLOR_CYAN
-
-        (cw, _), _ = cv2.getTextSize(count_text, cv2.FONT_HERSHEY_SIMPLEX, 4.0, 5)
-        cv2.putText(frame, count_text, (w // 2 - cw // 2, h // 2 + 60),
-                    cv2.FONT_HERSHEY_SIMPLEX, 4.0, count_color, 5, cv2.LINE_AA)
+        (cw, _), _ = cv2.getTextSize(countdown_state["text"], cv2.FONT_HERSHEY_SIMPLEX, 4.0, 5)
+        cv2.putText(frame, countdown_state["text"], (w // 2 - cw // 2, h // 2 + 60),
+                    cv2.FONT_HERSHEY_SIMPLEX, 4.0, countdown_state["color"], 5, cv2.LINE_AA)
 
         pos_text = "Camera ke saamne position lo!"
         (pw, _), _ = cv2.getTextSize(pos_text, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
         cv2.putText(frame, pos_text, (w // 2 - pw // 2, h // 2 + 120),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, COLOR_YELLOW, 2, cv2.LINE_AA)
 
-        cv2.imshow("Exercise Helper", frame)
+        if not safe_imshow("Exercise Helper", frame):
+            return False
 
-        if remaining <= -1:
+        if countdown_state["finished"]:
             break
 
-        key = cv2.waitKey(30) & 0xFF
+        key = safe_wait_key(30)
         if key == ord('q') or key == 27:
             return False
 
@@ -904,6 +913,8 @@ def run_exercise(cap, exercise_info, duration):
     reps = 0
     stage = "up"
     start_time = time.time()
+    last_voice_time = 0
+    last_voice_text = ""
 
     # Create PoseLandmarker in VIDEO mode (synchronous per-frame)
     options = PoseLandmarkerOptions(
@@ -943,6 +954,7 @@ def run_exercise(cap, exercise_info, duration):
 
             form_score = "good"
             feedback_list = []
+            voice_instruction = None
 
             if result.pose_landmarks and len(result.pose_landmarks) > 0:
                 landmarks = result.pose_landmarks[0]  # First person
@@ -951,6 +963,12 @@ def run_exercise(cap, exercise_info, duration):
                 reps, stage, form_score, feedback_list = analyze_func(
                     landmarks, w, h, frame, reps, stage
                 )
+
+                voice_instruction = build_voice_instruction(exercise_name, form_score, feedback_list)
+                if voice_instruction != last_voice_text or time.time() - last_voice_time > 4:
+                    speak_text(voice_instruction)
+                    last_voice_time = time.time()
+                    last_voice_text = voice_instruction
 
                 # Draw skeleton
                 if form_score == "good":
@@ -972,9 +990,10 @@ def run_exercise(cap, exercise_info, duration):
             cv2.putText(frame, "Q=Quit | S=Skip", (10, h - 10),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.4, (150, 150, 150), 1, cv2.LINE_AA)
 
-            cv2.imshow("Exercise Helper", frame)
+            if not safe_imshow("Exercise Helper", frame):
+                return -1
 
-            key = cv2.waitKey(10) & 0xFF
+            key = safe_wait_key(10)
             if key == ord('q') or key == 27:
                 return -1
             if key == ord('s'):
@@ -1018,10 +1037,133 @@ def show_menu():
             print("  Sirf number daalo! Comma se multiple choose karo (e.g., 1,2,5)")
 
 
+def parse_args(argv=None):
+    """Parse CLI arguments for demo mode and non-interactive usage."""
+    parser = argparse.ArgumentParser(description="Exercise helper with pose-based feedback")
+    parser.add_argument("--demo", action="store_true", help="run a built-in demo without needing a webcam")
+    parser.add_argument("--camera-index", type=int, default=0, help="webcam device index to try")
+    parser.add_argument("--duration", type=int, default=EXERCISE_DURATION, help="seconds per exercise")
+    parser.add_argument("--break-duration", type=int, default=BREAK_DURATION, help="seconds between exercises")
+    parser.add_argument("--exercise", type=int, nargs="*", help="exercise numbers to run (e.g. --exercise 1 2 5)")
+    return parser.parse_args(argv)
+
+
+def open_video_capture(camera_index=0, backends=None):
+    """Try to open a webcam using common backends and indices."""
+    if backends is None:
+        backends = [
+            getattr(cv2, "CAP_DSHOW", None),
+            getattr(cv2, "CAP_MSMF", None),
+            cv2.CAP_ANY,
+        ]
+    backends = [backend for backend in backends if isinstance(backend, int)]
+
+    for backend in backends:
+        for index in [camera_index, 0, 1, 2]:
+            cap = cv2.VideoCapture(index, backend)
+            if not cap.isOpened():
+                cap.release()
+                continue
+            ret, _ = cap.read()
+            if ret:
+                return cap
+            cap.release()
+
+    return None
+
+
+def safe_imshow(window_name, frame):
+    """Show a frame only when OpenCV can display it."""
+    try:
+        cv2.imshow(window_name, frame)
+        return True
+    except cv2.error:
+        return False
+
+
+def safe_wait_key(delay=10):
+    """Wait for a key press without crashing when no GUI is available."""
+    try:
+        return cv2.waitKey(delay) & 0xFF
+    except cv2.error:
+        return -1
+
+
+def build_voice_instruction(exercise_name, form_score, feedback_list):
+    """Create a calm, slow spoken instruction based on current exercise feedback."""
+    base_message = f"{exercise_name}. Please move slowly and steadily."
+    if form_score == "good":
+        return f"{base_message} Great form. Keep going."
+
+    if feedback_list:
+        first_msg = feedback_list[0][0]
+        cleaned = first_msg.replace(">>", "").strip()
+        if form_score == "bad":
+            return f"{base_message} Correct your form now. {cleaned}. Adjust slowly."
+        return f"{base_message} {cleaned}. Please correct it slowly."
+
+    return f"{base_message} Please correct your posture slowly."
+
+
+def speak_text(text):
+    """Speak the provided text using the system TTS if available."""
+    try:
+        if sys.platform.startswith("win"):
+            subprocess.run([
+                "powershell",
+                "-NoProfile",
+                "-Command",
+                f"Add-Type -AssemblyName System.speech; $speak = New-Object System.Speech.Synthesis.SpeechSynthesizer; $speak.Rate = -2; $speak.Volume = 100; $speak.Speak('{text.Replace("'", "''")}')"
+            ], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        else:
+            subprocess.run(["espeak", text], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        return False
+    return True
+
+
+def run_demo(args):
+    """Run a short demo mode when no webcam is available."""
+    print("\n  Demo mode started. Showing a synthetic exercise preview...")
+    width, height = 640, 480
+    canvas = np.zeros((height, width, 3), dtype=np.uint8)
+    start_time = time.time()
+
+    while time.time() - start_time < 8:
+        canvas.fill(20)
+        cv2.rectangle(canvas, (40, 40), (width - 40, height - 40), (50, 50, 50), 2)
+        cv2.putText(canvas, "Exercise Helper Demo", (80, 90), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 215, 0), 2, cv2.LINE_AA)
+        cv2.putText(canvas, "Pose analysis ready", (80, 150), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 220, 255), 2, cv2.LINE_AA)
+        cv2.putText(canvas, "Camera not available", (80, 210), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2, cv2.LINE_AA)
+        cv2.putText(canvas, "Run with a webcam for live feedback", (80, 270), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2, cv2.LINE_AA)
+
+        if not safe_imshow("Exercise Helper", canvas):
+            print("  Display unavailable; demo is running in console mode.")
+            time.sleep(0.2)
+        else:
+            safe_wait_key(30)
+
+    cv2.destroyAllWindows()
+    print("  Demo completed.")
+
+
+def resolve_selected_exercises(args):
+    """Resolve selected exercises from CLI or interactive menu."""
+    if args.exercise is not None:
+        if len(args.exercise) == 0:
+            return []
+        if 11 in args.exercise:
+            return list(EXERCISES.keys())
+        return args.exercise
+    return show_menu()
+
+
 # ═══════════════════════════════════════════════════════════
 # MAIN APPLICATION
 # ═══════════════════════════════════════════════════════════
 def main():
+    args = parse_args()
+
     # Check model file
     if not os.path.exists(MODEL_PATH):
         print(f"\n  ERROR: Model file not found at: {MODEL_PATH}")
@@ -1030,19 +1172,25 @@ def main():
         print("  Save as 'pose_landmarker.task' in the same folder as this script.")
         sys.exit(1)
 
+    if args.demo:
+        run_demo(args)
+        return
+
     print("\n  Webcam start ho raha hai...")
 
-    cap = cv2.VideoCapture(0)
-    if not cap.isOpened():
-        print("  ERROR: Webcam open nahi ho raha! Camera check karo.")
-        sys.exit(1)
+    cap = open_video_capture(args.camera_index)
+    if cap is None:
+        print("  WARNING: Webcam open nahi ho raha! Camera check karo.")
+        print("  Launching demo mode instead.")
+        run_demo(args)
+        return
 
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
 
     try:
         while True:
-            selected = show_menu()
+            selected = resolve_selected_exercises(args)
 
             if not selected:
                 print("\n  Bye bye! Exercise karte raho!")
@@ -1050,7 +1198,7 @@ def main():
 
             selected_names = [EXERCISES[s]["name"] for s in selected]
             print(f"\n  Selected: {', '.join(selected_names)}")
-            print(f"  Har exercise: {EXERCISE_DURATION}s | Break: {BREAK_DURATION}s")
+            print(f"  Har exercise: {args.duration}s | Break: {args.break_duration}s")
             print(f"  Webcam window me dekho... Camera ke saamne position lo!")
 
             results = []
@@ -1062,7 +1210,7 @@ def main():
                 if not show_countdown(cap, exercise["name"]):
                     break
 
-                rep_count = run_exercise(cap, exercise, EXERCISE_DURATION)
+                rep_count = run_exercise(cap, exercise, args.duration)
 
                 if rep_count == -1:
                     break
@@ -1072,8 +1220,8 @@ def main():
 
                 if i < len(selected) - 1:
                     next_ex = EXERCISES[selected[i + 1]]["name"]
-                    print(f"  {BREAK_DURATION}s break... Next: {next_ex}")
-                    cont = show_break_screen(cap, BREAK_DURATION, next_ex)
+                    print(f"  {args.break_duration}s break... Next: {next_ex}")
+                    cont = show_break_screen(cap, args.break_duration, next_ex)
                     if not cont:
                         break
 
